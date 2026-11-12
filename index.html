@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Трекер успеваемости</title>
+<style>
+  :root{--bg:#f6f7fb;--card:#fff;--tx:#1d2030;--mut:#6b7188;--ac:#5b5bd6;--bd:#e3e5ef}
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx)}
+  header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:14px 20px;background:var(--card);border-bottom:1px solid var(--bd);position:sticky;top:0;z-index:5}
+  h1{font-size:18px;margin:0 auto 0 0}
+  main{padding:20px;max-width:1300px;margin:auto}
+  button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid var(--bd);background:var(--card);cursor:pointer}
+  button.primary{background:var(--ac);color:#fff;border-color:var(--ac)}
+  button:hover{filter:brightness(.96)}
+  details{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:10px 14px;margin-bottom:16px}
+  summary{cursor:pointer;font-weight:600}
+  label{display:block;margin:12px 0 4px;font-size:13px;color:var(--mut)}
+  input,textarea,select{width:100%;font:inherit;padding:8px;border:1px solid var(--bd);border-radius:8px;background:#fff}
+  textarea{min-height:90px;resize:vertical}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:800px){.row{grid-template-columns:1fr}}
+  .tabs{display:flex;gap:8px;margin-bottom:14px}
+  .tabs button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+  .status{color:var(--mut);font-size:13px;margin:0 0 12px}
+  .err{color:#b3261e}
+  table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--bd);border-radius:10px;overflow:hidden}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--bd);text-align:left;vertical-align:top;white-space:nowrap}
+  th{background:#eef0f8;font-size:13px}
+  .wrap{overflow-x:auto}
+  .badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;background:#eef0f8}
+  .zero{background:#fde2e0}.low{background:#fff0cf}.mixed{background:#e4eefc}.good{background:#dcf5e3}
+  .group{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;margin-bottom:16px}
+  .group h3{margin:0 0 8px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .chips button{font-size:13px}
+  .chips button.done{background:#dcf5e3}
+  .muted{color:var(--mut);font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Трекер успеваемости</h1>
+  <button class="primary" id="load">Загрузить / обновить</button>
+</header>
+<main>
+<details id="settings" open>
+  <summary>Настройки (хранятся только в этом браузере)</summary>
+  <div class="row">
+    <div>
+      <label>OAuth Client ID (из Google Cloud)</label>
+      <input id="clientId" placeholder="123456-abc.apps.googleusercontent.com">
+      <label>Ссылка на таблицу с метриками</label>
+      <input id="url" placeholder="https://docs.google.com/spreadsheets/d/.../edit">
+      <label>Название листа (пусто = первый лист)</label>
+      <input id="sheet">
+      <label>Месяц в сообщениях</label>
+      <input id="month">
+    </div>
+    <div>
+      <label>Мои группы (по одной в строке, колонка «Группы старшего куратора»)</label>
+      <textarea id="filters"></textarea>
+      <label>Имена учеников: «ID;Имя» по одному в строке (можно вставить из таблицы)</label>
+      <textarea id="names" placeholder="12345;Матвей"></textarea>
+    </div>
+  </div>
+  <p class="muted">Пороги: «хорошо» — среднее по просмотру и сдаче от 70%. Меняется константой GOOD в коде.</p>
+</details>
+
+<div class="tabs">
+  <button data-tab="table" class="on">Таблица</button>
+  <button data-tab="msgs">Сообщения</button>
+</div>
+<p class="status" id="status">Нажми «Загрузить / обновить».</p>
+<div id="table"></div>
+<div id="msgs" hidden></div>
+</main>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+const GOOD = 70;
+const SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
+const EMOJI = {'физика':'🧡','математика':'💙','информатика':'💻','русский язык':'💛'};
+const PO = {'физика':'физике','математика':'математике','информатика':'информатике','русский язык':'русскому языку'};
+const CATS = {
+  zero:{t:'Ноль (ничего не просмотрено и не сдано)',c:'zero'},
+  low:{t:'Низкая успеваемость',c:'low'},
+  mixed:{t:'Где-то хорошо, где-то нужно подтянуть',c:'mixed'},
+  good:{t:'Всё хорошо',c:'good'}
+};
+const HEAD = '{имя}, привет! 🍁\nПодходит к концу {месяц} — время подвести итоги месяца и понять, как двигаемся дальше\n\nТвоя статистика за {месяц}:\n{статистика}\n\n';
+const DEF_TPL = {
+  zero: HEAD+'В этом месяце пока всё на нуле, и это нормально — начать никогда не поздно. Давай с малого: один вебинар и одно ДЗ на этой неделе. Что мешает начать? Расскажи, подскажу, как встроиться в ритм 💪',
+  low: HEAD+'По {слабые} пока есть куда подтянуть. Скажи, как тебе в целом {месяц}? Что получалось, а что мешало? Давай выберем одну небольшую цель на следующий месяц 🎯',
+  mixed: HEAD+'По {сильные} отличный результат — ты молодец! 😊 Но по {слабые} пока есть куда подтянуть. Скажи, как тебе в целом {месяц}?',
+  good: HEAD+'Отличный результат по всем предметам — ты молодец! 🔥 Скажи, как тебе в целом {месяц}? Какие цели ставишь на следующий месяц?'
+};
+const MONTHS=['январь','февраль','март','апрель','май','июнь','июль','август','сентябрь','октябрь','ноябрь','декабрь'];
+const $ = id => document.getElementById(id);
+const ls = {get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+
+// ---- настройки
+const fields = ['clientId','url','sheet','month','filters','names'];
+const defaults = {month:MONTHS[new Date().getMonth()],filters:'A3 - ГСК Информатика 10 класс Софья Вайб\nA4 - ГСК Информатика 10 класс Софья Вайб'};
+fields.forEach(f=>{ $(f).value = ls.get('s_'+f) ?? defaults[f] ?? ''; $(f).addEventListener('input',()=>{ls.set('s_'+f,$(f).value); if(DATA) render();}); });
+const tpl = k => ls.get('tpl_'+k) ?? DEF_TPL[k];
+let DATA = null, TOKEN = null, TOKEN_EXP = 0;
+
+// ---- вкладки
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
+  $('table').hidden = b.dataset.tab!=='table'; $('msgs').hidden = b.dataset.tab!=='msgs';
+});
+
+// ---- авторизация и загрузка
+function getToken(){
+  return new Promise((res,rej)=>{
+    if(TOKEN && Date.now()<TOKEN_EXP) return res(TOKEN);
+    if(!window.google) return rej(new Error('Скрипт Google не загрузился, проверь интернет и обнови страницу'));
+    const cid = $('clientId').value.trim();
+    if(!cid) return rej(new Error('Вставь OAuth Client ID в настройках'));
+    google.accounts.oauth2.initTokenClient({client_id:cid,scope:SCOPE,callback:r=>{
+      if(r.error) return rej(new Error('Вход не удался: '+r.error));
+      TOKEN=r.access_token; TOKEN_EXP=Date.now()+(r.expires_in-60)*1000; res(TOKEN);
+    },error_callback:e=>rej(new Error('Вход отменён или заблокирован: '+(e.type||'')))}).requestAccessToken();
+  });
+}
+async function api(path,token){
+  const r = await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+path,{headers:{Authorization:'Bearer '+token}});
+  if(!r.ok){ let m=''; try{m=(await r.json()).error.message}catch(e){} throw new Error('Google API '+r.status+': '+m); }
+  return r.json();
+}
+$('load').onclick = async ()=>{
+  const st = $('status'); st.className='status'; st.textContent='Загружаю…';
+  try{
+    const m = $('url').value.match(/\/d\/([\w-]+)/);
+    if(!m) throw new Error('Не вижу ID таблицы в ссылке');
+    const token = await getToken();
+    let sheet = $('sheet').value.trim();
+    if(!sheet) sheet = (await api(m[1]+'?fields=sheets.properties.title',token)).sheets[0].properties.title;
+    const j = await api(m[1]+'/values/'+encodeURIComponent(sheet)+'?valueRenderOption=FORMATTED_VALUE',token);
+    DATA = parse(j.values||[]);
+    $('settings').open = false;
+    st.textContent = 'Обновлено в '+new Date().toLocaleTimeString('ru')+'. Учеников: '+DATA.students.length;
+    render();
+  }catch(e){ st.className='status err'; st.textContent = e.message; }
+};
+
+// ---- разбор данных
+const norm = s => String(s??'').replace(/\s+/g,' ').trim();
+function pct(s){
+  s = norm(s); if(!s) return null;
+  const has = s.includes('%'); let n = parseFloat(s.replace('%','').replace(',','.'));
+  if(isNaN(n)) return null; return has ? n : (n<=1 ? n*100 : n);
+}
+function num(s){ const n=parseFloat(norm(s).replace(',','.')); return isNaN(n)?null:n; }
+function parse(values){
+  const hi = values.findIndex(r=>r.some(c=>norm(c)==='ID ученика'));
+  if(hi<0) throw new Error('Не нашла строку заголовков с «ID ученика»');
+  const H = values[hi].map(norm);
+  const col = n => H.indexOf(n);
+  const colP = n => H.findIndex(h=>h.startsWith(n));
+  const C = {id:col('ID ученика'),subj:col('Предметы'),grp:col('Группы старшего куратора'),tone:colP('Тип коммуникации'),
+    wv:col('Кол-во просмотренных вебов'),wa:col('Кол-во доступных вебов'),v:col('Ср.просмотренность'),
+    hd:col('Кол-во сделанных всех дз'),ha:col('Кол-во доступных всех дз'),s:col('Сдаваемость все дз'),
+    sr:col('Ср.сдаваемость - только регулярные дз'),sc:col('Средний балл все дз'),scr:col('Средний балл регулярные дз')};
+  const miss = Object.entries(C).filter(([k,v])=>v<0).map(([k])=>k);
+  if(miss.length) throw new Error('Не нашла колонки: '+miss.join(', ')+'. Проверь заголовки.');
+  const filters = $('filters').value.split('\n').map(norm).filter(Boolean);
+  const map = new Map();
+  for(const r of values.slice(hi+1)){
+    const g = norm(r[C.grp]);
+    if(!filters.some(f=>g.includes(f))) continue;
+    const id = norm(r[C.id]); if(!id) continue;
+    if(!map.has(id)) map.set(id,{id,tone:norm(r[C.tone]),subjects:{}});
+    map.get(id).subjects[norm(r[C.subj])] = {v:pct(r[C.v]),s:pct(r[C.s]),sc:num(r[C.sc]),scr:num(r[C.scr]),
+      wv:norm(r[C.wv]),wa:norm(r[C.wa]),hd:norm(r[C.hd]),ha:norm(r[C.ha])};
+  }
+  const students=[...map.values()];
+  const subjects=[...new Set(students.flatMap(s=>Object.keys(s.subjects)))].sort();
+  return {students,subjects};
+}
+
+// ---- категории и сообщения
+const mean = a => a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0;
+const subjScore = x => mean([x.v,x.s].filter(n=>n!=null));
+function category(st){
+  const sc = Object.values(st.subjects).map(subjScore);
+  if(!sc.length || Math.max(...sc)===0) return 'zero';
+  if(Math.min(...sc)>=GOOD) return 'good';
+  if(Math.max(...sc)>=GOOD) return 'mixed';
+  return 'low';
+}
+function nameMap(){
+  const m={}; $('names').value.split('\n').forEach(l=>{const p=l.split(/[;\t,]/); if(p.length>=2) m[norm(p[0])]=norm(p.slice(1).join(' '));}); return m;
+}
+const po = s => PO[s.toLowerCase()] || s.toLowerCase();
+const list = a => a.length<2 ? a.join('') : a.slice(0,-1).join(', ')+' и '+a[a.length-1];
+function build(st,name,text){
+  const ents = Object.entries(st.subjects);
+  const stats = ents.map(([s,x])=>`${EMOJI[s.toLowerCase()]||'▫️'} ${s}: просмотрено ${Math.round(x.v??0)}%, сдано ${Math.round(x.s??0)}%`).join('\n');
+  const strong = list(ents.filter(([,x])=>subjScore(x)>=GOOD).map(([s])=>po(s)));
+  const weak = list(ents.filter(([,x])=>subjScore(x)<GOOD).map(([s])=>po(s)));
+  return text.split('{имя}').join(name).split('{месяц}').join($('month').value)
+    .split('{статистика}').join(stats).split('{сильные}').join(strong).split('{слабые}').join(weak);
+}
+
+// ---- отрисовка
+const esc = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function render(){
+  const names = nameMap(), {students,subjects}=DATA;
+  students.forEach(s=>s.cat=category(s));
+  let h='<div class="wrap"><table><tr><th>Ученик</th><th>Тип общения</th><th>Категория</th>'+subjects.map(s=>`<th>${esc(s)}<br><span class="muted">просм · сдано · балл</span></th>`).join('')+'</tr>';
+  for(const s of students){
+    h+=`<tr><td>${esc(names[s.id]||'')} <span class="muted">${esc(s.id)}</span></td><td>${esc(s.tone)}</td><td><span class="badge ${CATS[s.cat].c}">${CATS[s.cat].t}</span></td>`;
+    for(const sub of subjects){
+      const x=s.subjects[sub];
+      h+= x ? `<td title="вебы ${esc(x.wv)} из ${esc(x.wa)}; ДЗ ${esc(x.hd)} из ${esc(x.ha)}">${Math.round(x.v??0)}% · ${Math.round(x.s??0)}% · ${x.sc??'—'}</td>` : '<td>—</td>';
+    }
+    h+='</tr>';
+  }
+  $('table').innerHTML = h+'</table></div><p class="muted">Наведи на ячейку, чтобы увидеть «сколько из скольки» (на случай вопроса ученика).</p>';
+
+  let m='';
+  for(const k of Object.keys(CATS)){
+    const g = students.filter(s=>s.cat===k); if(!g.length) continue;
+    m+=`<div class="group"><h3><span class="badge ${CATS[k].c}">${CATS[k].t}</span> — ${g.length}</h3>
+      <label>Шаблон (плейсхолдеры: {имя} {месяц} {статистика} {сильные} {слабые}). Правки сохраняются.</label>
+      <textarea data-k="${k}" style="min-height:170px">${esc(tpl(k))}</textarea>
+      <div class="chips">${g.map(s=>`<button data-k="${k}" data-id="${esc(s.id)}">Копировать: ${esc(names[s.id]||s.id)}</button>`).join('')}</div></div>`;
+  }
+  $('msgs').innerHTML = m || '<p>Нет учеников под фильтр.</p>';
+  $('msgs').querySelectorAll('textarea').forEach(t=>t.oninput=()=>ls.set('tpl_'+t.dataset.k,t.value));
+  $('msgs').querySelectorAll('.chips button').forEach(b=>b.onclick=async()=>{
+    const st=students.find(s=>s.id===b.dataset.id), text=$('msgs').querySelector(`textarea[data-k="${b.dataset.k}"]`).value;
+    const msg=build(st,names[st.id]||st.id,text);
+    try{await navigator.clipboard.writeText(msg)}catch(e){const t=document.createElement('textarea');t.value=msg;document.body.append(t);t.select();document.execCommand('copy');t.remove();}
+    b.classList.add('done'); b.textContent='✓ '+b.textContent.replace(/^(Копировать|✓)[: ]*/,'');
+  });
+}
+</script>
+</body>
+</html>
